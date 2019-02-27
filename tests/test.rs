@@ -17,11 +17,26 @@ impl Drop for A<'_> {
 }
 impl Drop for B<'_> {
     fn drop(&mut self) {
+        assert_eq!(
+            *self.a.drop_count, 0,
+            "A was dropped {} times before B",
+            *self.a.drop_count
+        );
         *self.drop_count += 1
     }
 }
 impl Drop for C<'_> {
     fn drop(&mut self) {
+        assert_eq!(
+            *self.b.a.drop_count, 0,
+            "A was dropped {} times before C",
+            *self.b.a.drop_count
+        );
+        assert_eq!(
+            *self.b.drop_count, 0,
+            "B was dropped {} times before C",
+            &self.b.drop_count
+        );
         *self.drop_count += 1
     }
 }
@@ -39,7 +54,7 @@ mod store {
 use store::Store;
 
 #[test]
-fn test_store() {
+fn test_drop_counts() {
     let mut a_drops = 0;
     let mut b_drops = 0;
     let mut c_drops = 0;
@@ -66,6 +81,9 @@ fn test_store() {
         assert_eq!(b_drops, 1);
         assert_eq!(c_drops, 1);
     }
+    a_drops = 0;
+    b_drops = 0;
+    c_drops = 0;
     {
         let a = store.build_a(A {
             drop_count: &mut a_drops,
@@ -74,21 +92,24 @@ fn test_store() {
             a: a,
             drop_count: &mut b_drops,
         });
-        assert_eq!(*b.a().drop_count, 1);
-        assert_eq!(*b.b().drop_count, 1);
+        assert_eq!(*b.a().drop_count, 0);
+        assert_eq!(*b.b().drop_count, 0);
         std::mem::drop(b);
-        assert_eq!(a_drops, 2);
-        assert_eq!(b_drops, 2);
-        assert_eq!(c_drops, 1);
+        assert_eq!(a_drops, 1);
+        assert_eq!(b_drops, 1);
+        assert_eq!(c_drops, 0);
     }
+    a_drops = 0;
+    b_drops = 0;
+    c_drops = 0;
     {
         let a = store.build_a(A {
             drop_count: &mut a_drops,
         });
-        assert_eq!(*a.a().drop_count, 2);
+        assert_eq!(*a.a().drop_count, 0);
         std::mem::drop(a);
-        assert_eq!(a_drops, 3);
-        assert_eq!(b_drops, 2);
-        assert_eq!(c_drops, 1);
+        assert_eq!(a_drops, 1);
+        assert_eq!(b_drops, 0);
+        assert_eq!(c_drops, 0);
     }
 }

@@ -149,9 +149,12 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 };
                 structs.push(substruct_def);
-                drop_stmts.stmts.push(syn::parse_quote! {
-                    unsafe{::std::mem::ManuallyDrop::drop(&mut self.store.#field_ident)};
-                });
+                drop_stmts.stmts.insert(
+                    0,
+                    syn::parse_quote! {
+                        unsafe{::std::mem::ManuallyDrop::drop(&mut self.store.#field_ident)};
+                    },
+                );
                 let dropimpl = syn::parse_quote! {
                     impl<'a> Drop for #substruct_ident<'a> {
                         fn drop(&mut self) {
