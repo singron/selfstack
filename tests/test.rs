@@ -44,7 +44,7 @@ impl Drop for C<'_> {
 mod store {
     use super::*;
     #[selfstack::selfstack]
-    pub struct Store<'x> {
+    pub(super) struct Store<'x> {
         a: A<'x>,
         b: B<'a>,
         c: C<'b>,

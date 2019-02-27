@@ -42,6 +42,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut fields: HashMap<syn::Ident, bool> = HashMap::new();
     let sname = &struct_def.ident;
     let mut new_params = syn::punctuated::Punctuated::new();
+    let vis = &struct_def.vis;
     for p in &struct_def.generics.params {
         match p {
             syn::GenericParam::Lifetime(_) => (),
@@ -52,7 +53,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let impl_res = syn::parse_quote! {
         impl<'a> #sname {
             #[inline]
-            pub(super) fn new() -> Self {
+             #vis fn new() -> Self {
                 unsafe{::std::mem::uninitialized()}
             }
         }
@@ -116,7 +117,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let borrow = impls.len() == 1;
                 let build: syn::ImplItem = if borrow {
                     syn::parse_quote! {
-                        pub(super) fn #build_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
+                        #vis fn #build_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
                             let #field_ident = unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)};
                             self.#field_ident = ::std::mem::ManuallyDrop::new(#field_ident);
                             #substruct_ident{
@@ -126,7 +127,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 } else {
                     syn::parse_quote! {
-                        pub(super) fn #build_ident<F>(mut self, initf: F) -> #substruct_ident<'a>
+                        #vis fn #build_ident<F>(mut self, initf: F) -> #substruct_ident<'a>
                             where F: FnOnce(#field_refs) -> #ty_lt_b
                         {
                             let store = unsafe{::std::mem::replace(&mut self.store, ::std::mem::uninitialized())};
@@ -144,7 +145,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
                 impls.last_mut().unwrap().items.push(build);
                 let substruct_def = syn::parse_quote! {
-                    pub(super) struct #substruct_ident<'a> {
+                    #vis struct #substruct_ident<'a> {
                         store: &'a mut #sname,
                     }
                 };
@@ -172,7 +173,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 store_refs.push(syn::parse_quote!(
                         unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&store.#field_ident)}));
                 field_getters.push(syn::parse_quote! {
-                    pub(super) fn #field_ident(&'a self) -> &#ty_lt_a {
+                    #vis fn #field_ident(&'a self) -> &#ty_lt_a {
                         &self.store.#field_ident
                     }
                 });
