@@ -72,12 +72,13 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     match &mut struct_def.fields {
         syn::Fields::Named(ref mut fns) => {
             for field in fns.named.iter_mut() {
-                let (build_name, substruct_name) = match &field.ident {
+                let (build_name, try_build_name, substruct_name) = match &field.ident {
                     None => panic!("only named fields"),
                     Some(ident) => {
                         fields.insert(ident.clone(), true);
                         (
                             format!("build_{}", ident),
+                            format!("try_build_{}", ident),
                             format!("{}_{}", struct_def.ident, ident),
                         )
                     }
@@ -115,6 +116,8 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
                 let field_ident = &field.ident;
                 let build_ident = syn::Ident::new(&build_name, proc_macro2::Span::call_site());
+                let try_build_ident =
+                    syn::Ident::new(&try_build_name, proc_macro2::Span::call_site());
                 let substruct_ident =
                     syn::Ident::new(&substruct_name, proc_macro2::Span::call_site());
                 let borrow = impls.len() == 1;
@@ -147,6 +150,25 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 };
                 impls.last_mut().unwrap().items.push(build);
+                if !borrow {
+                    let trybuild = syn::parse_quote! {
+                        #vis fn #try_build_ident<F, E>(mut self, initf: F) -> Result<#substruct_ident<'a>, E>
+                            where F: FnOnce(#field_refs) -> Result<#ty_lt_b, E>
+                        {
+                            let store = unsafe{::std::mem::replace(&mut self.store, ::std::mem::uninitialized())};
+                            ::std::mem::forget(self);
+                            let #field_ident = {
+                                let #field_ident = initf(#store_refs)?;
+                                unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
+                            };
+                            store.#field_ident = ::std::mem::ManuallyDrop::new(#field_ident);
+                            Ok(#substruct_ident{
+                                store: &mut*store,
+                            })
+                        }
+                    };
+                    impls.last_mut().unwrap().items.push(trybuild);
+                }
                 let substruct_def = syn::parse_quote! {
                     #vis struct #substruct_ident<'a> {
                         store: &'a mut #sname,

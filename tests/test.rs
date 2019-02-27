@@ -112,4 +112,26 @@ fn test_drop_counts() {
         assert_eq!(b_drops, 0);
         assert_eq!(c_drops, 0);
     }
+    a_drops = 0;
+    b_drops = 0;
+    c_drops = 0;
+    {
+        let a = store.build_a(A {
+            drop_count: &mut a_drops,
+        });
+        let b = a
+            .try_build_b(|a: &A| -> Result<_, ()> {
+                Ok(B {
+                    a: a,
+                    drop_count: &mut b_drops,
+                })
+            })
+            .unwrap();
+        assert_eq!(*b.a().drop_count, 0);
+        assert_eq!(*b.b().drop_count, 0);
+        std::mem::drop(b);
+        assert_eq!(a_drops, 1);
+        assert_eq!(b_drops, 1);
+        assert_eq!(c_drops, 0);
+    }
 }
