@@ -20,6 +20,9 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
                                 syn::GenericArgument::Lifetime(l) => {
                                     *l = lt.clone();
                                 }
+                                syn::GenericArgument::Type(ref mut t) => {
+                                    replace_lifetimes(t, lt.clone())?;
+                                }
                                 _ => (),
                             }
                         }
