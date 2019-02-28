@@ -69,21 +69,28 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         syn::punctuated::Punctuated::new();
     let mut drop_stmts: syn::Block = syn::parse_quote!({});
     let mut field_getters: Vec<syn::ImplItem> = vec![];
+    let mut view_fields: syn::FieldsNamed = syn::parse_quote!({
+        _use_lt_a: ::std::marker::PhantomData<&'b &'a ()>,
+    });
+    let mut view_field_refs = syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
+    view_field_refs.push(syn::parse_quote!(_use_lt_a: ::std::marker::PhantomData));
     match &mut struct_def.fields {
         syn::Fields::Named(ref mut fns) => {
             for field in fns.named.iter_mut() {
-                let (build_name, try_build_name, substruct_name, mut_name) = match &field.ident {
-                    None => panic!("only named fields"),
-                    Some(ident) => {
-                        fields.insert(ident.clone(), true);
-                        (
-                            format!("build_{}", ident),
-                            format!("try_build_{}", ident),
-                            format!("{}_{}", struct_def.ident, ident),
-                            format!("mut_{}", ident),
-                        )
-                    }
-                };
+                let (build_name, try_build_name, substruct_name, viewstruct_name, mut_name) =
+                    match &field.ident {
+                        None => panic!("only named fields"),
+                        Some(ident) => {
+                            fields.insert(ident.clone(), true);
+                            (
+                                format!("build_{}", ident),
+                                format!("try_build_{}", ident),
+                                format!("{}_{}", struct_def.ident, ident),
+                                format!("{}_View_{}", struct_def.ident, ident),
+                                format!("mut_{}", ident),
+                            )
+                        }
+                    };
                 match &field.vis {
                     syn::Visibility::Inherited => (),
                     x => {
@@ -122,6 +129,8 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     syn::Ident::new(&try_build_name, proc_macro2::Span::call_site());
                 let substruct_ident =
                     syn::Ident::new(&substruct_name, proc_macro2::Span::call_site());
+                let viewstruct_ident =
+                    syn::Ident::new(&viewstruct_name, proc_macro2::Span::call_site());
                 let borrow = impls.len() == 1;
                 let build: syn::ImplItem = if borrow {
                     syn::parse_quote! {
@@ -224,6 +233,41 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 };
                 impls.last_mut().unwrap().items.push(mut_getter);
+                if !view_field_refs.empty_or_trailing() {
+                    view_field_refs.push_punct(syn::Token![,](proc_macro2::Span::call_site()));
+                }
+                view_field_refs.push(syn::parse_quote!(
+                        #field_ident: unsafe{::std::mem::transmute::<
+                            &'b mut #ty_lt_static, &'b mut #ty_lt_a>(
+                                &mut self.store.#field_ident)}));
+                let view_struct_expr: syn::Expr = syn::parse_quote! {
+                        #viewstruct_ident{
+                            #view_field_refs
+                        }
+                };
+                let view_getter = syn::parse_quote! {
+                    #vis fn view(&'b mut self) -> #viewstruct_ident<'a, 'b> {
+                        return #view_struct_expr;
+                    }
+                };
+                impls.last_mut().unwrap().items.push(view_getter);
+                view_field_refs.pop();
+                view_field_refs.push(syn::parse_quote!(#field_ident: &self.store.#field_ident));
+                let mut_view_field: syn::ItemStruct =
+                    syn::parse_quote!(struct dummy {#vis #field_ident: &'b mut #ty_lt_a});
+                view_fields
+                    .named
+                    .push(mut_view_field.fields.iter().next().unwrap().clone());
+                structs.push(syn::parse_quote! {
+                    #vis struct #viewstruct_ident<'a: 'b, 'b>
+                        #view_fields
+                });
+                view_fields.named.pop();
+                let const_view_field: syn::ItemStruct =
+                    syn::parse_quote!(struct dummy {#vis #field_ident: &'b #ty_lt_a});
+                view_fields
+                    .named
+                    .push(const_view_field.fields.iter().next().unwrap().clone());
             }
         }
         _ => panic!("only named fields supported"),

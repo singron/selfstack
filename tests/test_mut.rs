@@ -10,14 +10,17 @@ mod store {
     }
 }
 
-fn mut_a(s_a: &mut store::Store_a) {
-    let a = s_a.mut_a();
-}
-
+#[test]
 fn test_mut() {
     let mut s = store::Store::new();
     let mut s_a = s.build_a(A { x: 1 });
     {
-        mut_a(&mut s_a);
+        s_a.mut_a().x = 2;
     }
+    assert_eq!(s_a.a().x, 2);
+    {
+        let view = s_a.view();
+        view.a.x = 3;
+    }
+    assert_eq!(s_a.a().x, 3);
 }
