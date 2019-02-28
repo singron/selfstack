@@ -72,7 +72,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     match &mut struct_def.fields {
         syn::Fields::Named(ref mut fns) => {
             for field in fns.named.iter_mut() {
-                let (build_name, try_build_name, substruct_name) = match &field.ident {
+                let (build_name, try_build_name, substruct_name, mut_name) = match &field.ident {
                     None => panic!("only named fields"),
                     Some(ident) => {
                         fields.insert(ident.clone(), true);
@@ -80,6 +80,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             format!("build_{}", ident),
                             format!("try_build_{}", ident),
                             format!("{}_{}", struct_def.ident, ident),
+                            format!("mut_{}", ident),
                         )
                     }
                 };
@@ -115,6 +116,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     return e.to_compile_error().into();
                 }
                 let field_ident = &field.ident;
+                let mut_ident = syn::Ident::new(&mut_name, proc_macro2::Span::call_site());
                 let build_ident = syn::Ident::new(&build_name, proc_macro2::Span::call_site());
                 let try_build_ident =
                     syn::Ident::new(&try_build_name, proc_macro2::Span::call_site());
@@ -205,6 +207,23 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 for getter in &field_getters {
                     impls.last_mut().unwrap().items.push(getter.clone());
                 }
+                // The mut getter is a little more complicated. Interior
+                // lifetimes in mut references aren't covariant, unlike const
+                // references. In this case, the interior 'static lifetime
+                // isn't automatically subtyped to 'a. The danger is that if T
+                // contains a mutable reference, we could set that reference
+                // to something that lives as long as 'a, but supertype thinks
+                // it needs to live as long as 'static. Normally that would be
+                // correct, but in this case, the 'static lifetime is a lie to
+                // make the store struct compilable, and the field will be
+                // dropped after 'a.
+                let mut_getter = syn::parse_quote! {
+                    #vis fn #mut_ident(&'b mut self) -> &'b mut #ty_lt_a {
+                        unsafe{::std::mem::transmute::<&'b mut #ty_lt_static, &'b mut #ty_lt_a>(
+                                &mut self.store.#field_ident)}
+                    }
+                };
+                impls.last_mut().unwrap().items.push(mut_getter);
             }
         }
         _ => panic!("only named fields supported"),
