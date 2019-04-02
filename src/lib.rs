@@ -210,7 +210,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&store.#field_ident)}));
                 field_getters.push(syn::parse_quote! {
                     #vis fn #field_ident(&'a self) -> &#ty_lt_a {
-                        &self.store.#field_ident
+                        unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&self.store.#field_ident)}
                     }
                 });
                 for getter in &field_getters {
