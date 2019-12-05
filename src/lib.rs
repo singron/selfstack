@@ -53,28 +53,14 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     struct_def.generics.params = new_params;
-    let mut init_fields = syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
-    match &struct_def.fields {
-        syn::Fields::Named(ref fns) => {
-            for field in &fns.named {
-                let fname = &field.ident;
-                init_fields.push(syn::parse_quote!(
-                        #fname: ::std::mem::MaybeUninit::uninit()
-                ));
-            }
-        }
-        _ => panic!("struct must have named fields"),
-    }
-
-    let impl_res = syn::parse_quote! {
-        impl<'a> #sname {
-            #[inline]
-            #vis fn new() -> Self {
-                 #sname { #init_fields }
-            }
-        }
-    };
-    let mut impls: Vec<syn::ItemImpl> = vec![impl_res];
+    let store_ptrs_ident =
+        syn::Ident::new(&format!("{}_Ptrs", sname), proc_macro2::Span::call_site());
+    let mut init_field_values =
+        syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
+    let mut raw_ptr_field_values =
+        syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
+    let mut raw_ptr_fields: syn::FieldsNamed = syn::parse_quote!({});
+    let mut impls: Vec<syn::ItemImpl> = vec![];
     let mut structs: Vec<syn::ItemStruct> = vec![];
     let mut field_refs: syn::punctuated::Punctuated<syn::Type, syn::Token![,]> =
         syn::punctuated::Punctuated::new();
@@ -87,6 +73,13 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     });
     let mut view_field_refs = syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
     view_field_refs.push(syn::parse_quote!(_use_lt_a: ::std::marker::PhantomData));
+
+    let impl_new = syn::parse_quote! {
+        impl<'a> #sname {
+        }
+    };
+    impls.push(impl_new);
+
     match &mut struct_def.fields {
         syn::Fields::Named(ref mut fns) => {
             for field in fns.named.iter_mut() {
@@ -144,14 +137,28 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     syn::Ident::new(&substruct_name, proc_macro2::Span::call_site());
                 let viewstruct_ident =
                     syn::Ident::new(&viewstruct_name, proc_macro2::Span::call_site());
+                init_field_values.push(syn::parse_quote!(
+                        #field_ident: ::std::mem::MaybeUninit::uninit()
+                ));
+                raw_ptr_field_values.push(syn::parse_quote!(
+                        #field_ident: self.#field_ident.as_mut_ptr()
+                ));
+                let raw_ptr_field: syn::ItemStruct = syn::parse_quote!(struct dummy {
+                        #field_ident: *mut #ty_lt_static,
+                });
+                raw_ptr_fields
+                    .named
+                    .push(raw_ptr_field.fields.iter().next().unwrap().clone());
                 let borrow = impls.len() == 1;
                 let build: syn::ImplItem = if borrow {
                     syn::parse_quote! {
                         #vis fn #build_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
+                            let ptrs = self.ptrs();
                             let #field_ident = unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)};
-                            unsafe{::std::ptr::write(self.#field_ident.as_mut_ptr(), #field_ident)};
+                            unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
                             #substruct_ident{
-                                store: self,
+                                _store: ::std::marker::PhantomData,
+                                ptrs,
                             }
                         }
                     }
@@ -160,16 +167,16 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         #vis fn #build_ident<F>(mut self, initf: F) -> #substruct_ident<'a>
                             where F: FnOnce(#field_refs) -> #ty_lt_b
                         {
-                            let store = self.store as *mut #sname;
+                            let ptrs = self.ptrs;
                             ::std::mem::forget(self);
-                            let store = unsafe{&mut*store};
                             let #field_ident = {
                                 let #field_ident = initf(#store_refs);
                                 unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
                             };
-                            unsafe{::std::ptr::write(store.#field_ident.as_mut_ptr(), #field_ident)};
+                            unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
                             #substruct_ident{
-                                store: store,
+                                _store: ::std::marker::PhantomData,
+                                ptrs,
                             }
                         }
                     }
@@ -180,16 +187,16 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         #vis fn #try_build_ident<F, E>(mut self, initf: F) -> Result<#substruct_ident<'a>, E>
                             where F: FnOnce(#field_refs) -> Result<#ty_lt_b, E>
                         {
-                            let store = self.store as *mut #sname;
+                            let ptrs = self.ptrs;
                             ::std::mem::forget(self);
-                            let store = unsafe{&mut*store};
                             let #field_ident = {
                                 let #field_ident = initf(#store_refs)?;
                                 unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
                             };
-                            unsafe{::std::ptr::write(store.#field_ident.as_mut_ptr(), #field_ident)};
+                            unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
                             Ok(#substruct_ident{
-                                store: store,
+                                _store: ::std::marker::PhantomData,
+                                ptrs,
                             })
                         }
                     };
@@ -197,14 +204,15 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
                 let substruct_def = syn::parse_quote! {
                     #vis struct #substruct_ident<'a> {
-                        store: &'a mut #sname,
+                        _store: ::std::marker::PhantomData<&'a mut #sname>,
+                        ptrs: #store_ptrs_ident,
                     }
                 };
                 structs.push(substruct_def);
                 drop_stmts.stmts.insert(
                     0,
                     syn::parse_quote! {
-                        unsafe{::std::ptr::drop_in_place(self.store.#field_ident.as_mut_ptr())};
+                        unsafe{::std::ptr::drop_in_place(self.ptrs.#field_ident)};
                     },
                 );
                 let dropimpl = syn::parse_quote! {
@@ -222,10 +230,10 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 impls.push(subimpl);
                 field_refs.push(syn::parse_quote!(&'a #ty_lt_a));
                 store_refs.push(syn::parse_quote!(
-                        unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&*store.#field_ident.as_ptr())}));
+                        unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&*(ptrs.#field_ident as *const _))}));
                 field_getters.push(syn::parse_quote! {
                     #vis fn #field_ident(&'a self) -> &#ty_lt_a {
-                        unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&*self.store.#field_ident.as_ptr())}
+                        unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&*(self.ptrs.#field_ident as *const _))}
                     }
                 });
                 for getter in &field_getters {
@@ -244,7 +252,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let mut_getter = syn::parse_quote! {
                     #vis fn #mut_ident(&'b mut self) -> &'b mut #ty_lt_a {
                         unsafe{::std::mem::transmute::<&'b mut #ty_lt_static, &'b mut #ty_lt_a>(
-                                &mut *self.store.#field_ident.as_mut_ptr())}
+                                &mut *self.ptrs.#field_ident)}
                     }
                 };
                 impls.last_mut().unwrap().items.push(mut_getter);
@@ -254,7 +262,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 view_field_refs.push(syn::parse_quote!(
                         #field_ident: unsafe{::std::mem::transmute::<
                             &'b mut #ty_lt_static, &'b mut #ty_lt_a>(
-                                &mut *self.store.#field_ident.as_mut_ptr())}));
+                                &mut *self.ptrs.#field_ident)}));
                 let view_struct_expr: syn::Expr = syn::parse_quote! {
                         #viewstruct_ident{
                             #view_field_refs
@@ -268,7 +276,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 impls.last_mut().unwrap().items.push(view_getter);
                 view_field_refs.pop();
                 view_field_refs.push(
-                    syn::parse_quote!(#field_ident: unsafe{&*self.store.#field_ident.as_ptr()}),
+                    syn::parse_quote!(#field_ident: unsafe{&*(self.ptrs.#field_ident as *const _)}),
                 );
                 let mut_view_field: syn::ItemStruct =
                     syn::parse_quote!(struct dummy {#vis #field_ident: &'b mut #ty_lt_a});
@@ -289,6 +297,28 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         _ => panic!("only named fields supported"),
     };
+
+    impls.first_mut().unwrap().items.push(syn::parse_quote! {
+        #[inline]
+        #vis fn new() -> Self {
+             #sname { #init_field_values }
+        }
+    });
+    impls.first_mut().unwrap().items.push(syn::parse_quote! {
+        #[inline]
+        fn ptrs(&mut self) -> #store_ptrs_ident {
+            #store_ptrs_ident {
+                #raw_ptr_field_values
+            }
+        }
+    });
+    let store_ptrs_struct: syn::ItemStruct = syn::parse_quote! {
+        #[derive(Copy,Clone)]
+        struct #store_ptrs_ident
+            #raw_ptr_fields
+    };
+    structs.push(store_ptrs_struct);
+
     let res = quote!(#struct_def);
     let mut out = res.into();
     for s in structs {
