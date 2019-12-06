@@ -9,6 +9,7 @@ use quote::{quote, ToTokens};
 use std::collections::HashMap;
 use syn::spanned::Spanned;
 
+/// Replace all lifetimes in ty with the lifetime lt.
 fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::Error> {
     match ty {
         syn::Type::Path(ref mut p) => {
@@ -31,6 +32,11 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
                 }
             }
         }
+        syn::Type::Reference(ref mut r) => {
+            if let Some(ref mut l) = &mut r.lifetime {
+                *l = lt.clone();
+            }
+        }
         ref x => {
             let msg = format!("type not supported {:?}", &x);
             return Err(syn::Error::new(ty.span(), msg));
@@ -40,6 +46,99 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 }
 
 #[proc_macro_attribute]
+/// selfstack produces a stack-like self-referential data structure with a safe interface. This is
+/// safe because layers in the stack can only reference layers below them and lower layers outlive
+/// higher layers. This restriction prevents cycles, dangling references, and other unsoundness
+/// that would generally be possible with self-reference.
+///
+/// The struct with the selfstack attribute defines the layers of this stack with its fields. This
+/// struct is the Store. It provides storage for all fields ahead of time, but at first is
+/// uninitialized. Lifetime names are ignored, but you may use them to document references.
+///
+/// ```
+/// mod mystack {
+///     #[selfstack::selfstack]
+///     pub struct MyStore {
+///         layer1: u32,
+///         layer2: &'layer1 u32,
+///     }
+/// }
+/// ```
+///
+/// To initialize the first layer, call `set_$field(T)` on the Store with the value of the first
+/// field. This will return a SubStruct that will allow you to safely access the subset of
+/// initialized layers.
+///
+/// ```
+/// # mod mystack {
+/// #     #[selfstack::selfstack]
+/// #     pub struct MyStore {
+/// #         layer1: u32,
+/// #         layer2: &'layer1 u32,
+/// #     }
+/// # }
+/// #
+/// let mut store = mystack::MyStore::new();
+/// let sub_struct = store.set_layer1(42);
+/// ```
+///
+///
+/// You can initialize further layers with the `build_$field()` and `try_build_$field()` methods.
+/// These return SubStructs that will allow access to the next layer. For `build()`, you pass a
+/// closure that takes references to the previous fields and returns the value of the next field.
+/// `try_build()` is the same except the closure should return a `Result` and it will return a
+/// `Result`.
+///
+/// ```
+/// # mod mystack {
+/// #     #[selfstack::selfstack]
+/// #     pub struct MyStore {
+/// #         layer1: u32,
+/// #         layer2: &'layer1 u32,
+/// #     }
+/// # }
+/// #
+/// # let mut store = mystack::MyStore::new();
+/// # let sub_struct = store.set_layer1(42);
+/// let sub_struct = sub_struct.build_layer2(|layer1: &u32|->&u32 {
+///     &layer1
+/// });
+/// ```
+///
+/// You can get a const reference to any layer or a mutable reference to the top-most layer using
+/// methods that match ref_$fieldname() or mut_$fieldname(). If you need references to multiple
+/// layers simultaneously, you can call the view() method which will return a ViewStruct that
+/// contains public fields referencing each layer [^0].
+///
+/// ```
+/// # mod mystack {
+/// #     #[selfstack::selfstack]
+/// #     pub struct MyStore {
+/// #         layer1: u32,
+/// #         layer2: &'layer1 u32,
+/// #     }
+/// # }
+/// #
+/// # let mut store = mystack::MyStore::new();
+/// # let sub_struct = store.set_layer1(42);
+/// # let mut sub_struct = sub_struct.build_layer2(|layer1: &u32|->&u32 {
+/// #     &layer1
+/// # });
+/// assert_eq!(*sub_struct.ref_layer1(), 42);
+/// let view = sub_struct.view();
+/// assert_eq!(**view.layer2, 42);
+/// assert_eq!(*view.layer2, view.layer1);
+/// *view.layer2 = &0; // Top layer is mutable.
+/// assert_eq!(**view.layer2, 0);
+/// ```
+///
+/// When the SubStruct is dropped, the initialized fields will be dropped in reverse order and the
+/// Store can be reused.
+///
+/// [^0]: This cludge is due to limitations in the borrow checker. Calling a method on the
+/// SubStruct borrows the entire SubStruct, and the borrow checker won't allow multiple borrows
+/// simultaneously if any are mutable. The borrow checker is able to allow simultaneous borrows to
+/// the individual fields of a struct however.
 pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut struct_def = syn::parse_macro_input!(item as syn::ItemStruct);
     let mut fields: HashMap<syn::Ident, bool> = HashMap::new();
@@ -74,29 +173,38 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut view_field_refs = syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
     view_field_refs.push(syn::parse_quote!(_use_lt_a: ::std::marker::PhantomData));
 
-    let impl_new = syn::parse_quote! {
+    let store_impl = syn::parse_quote! {
         impl<'a> #sname {
         }
     };
-    impls.push(impl_new);
+    impls.push(store_impl);
 
     match &mut struct_def.fields {
         syn::Fields::Named(ref mut fns) => {
             for field in fns.named.iter_mut() {
-                let (build_name, try_build_name, substruct_name, viewstruct_name, mut_name) =
-                    match &field.ident {
-                        None => panic!("only named fields"),
-                        Some(ident) => {
-                            fields.insert(ident.clone(), true);
-                            (
-                                format!("build_{}", ident),
-                                format!("try_build_{}", ident),
-                                format!("{}_{}", struct_def.ident, ident),
-                                format!("{}_View_{}", struct_def.ident, ident),
-                                format!("mut_{}", ident),
-                            )
-                        }
-                    };
+                let (
+                    build_name,
+                    set_name,
+                    try_build_name,
+                    substruct_name,
+                    viewstruct_name,
+                    mut_name,
+                    ref_name,
+                ) = match &field.ident {
+                    None => panic!("only named fields"),
+                    Some(ident) => {
+                        fields.insert(ident.clone(), true);
+                        (
+                            format!("build_{}", ident),
+                            format!("set_{}", ident),
+                            format!("try_build_{}", ident),
+                            format!("{}_{}", struct_def.ident, ident),
+                            format!("{}_View_{}", struct_def.ident, ident),
+                            format!("mut_{}", ident),
+                            format!("ref_{}", ident),
+                        )
+                    }
+                };
                 match &field.vis {
                     syn::Visibility::Inherited => (),
                     x => {
@@ -114,6 +222,10 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     syn::Type::Path(ref mut p) => {
                         *p = syn::parse_quote!(::std::mem::MaybeUninit<#p>);
                     }
+                    syn::Type::Reference(ref r) => {
+                        let new_ty = syn::parse_quote!(::std::mem::MaybeUninit<#r>);
+                        field.ty = syn::Type::Path(new_ty);
+                    }
                     _ => panic!(),
                 };
                 let mut ty_lt_a = orig_ty.clone();
@@ -130,7 +242,9 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
                 let field_ident = &field.ident;
                 let mut_ident = syn::Ident::new(&mut_name, proc_macro2::Span::call_site());
+                let ref_ident = syn::Ident::new(&ref_name, proc_macro2::Span::call_site());
                 let build_ident = syn::Ident::new(&build_name, proc_macro2::Span::call_site());
+                let set_ident = syn::Ident::new(&set_name, proc_macro2::Span::call_site());
                 let try_build_ident =
                     syn::Ident::new(&try_build_name, proc_macro2::Span::call_site());
                 let substruct_ident =
@@ -149,10 +263,12 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 raw_ptr_fields
                     .named
                     .push(raw_ptr_field.fields.iter().next().unwrap().clone());
-                let borrow = impls.len() == 1;
-                let build: syn::ImplItem = if borrow {
+                // The first layer has no previous layers to reference, so use set instead of
+                // build.
+                let is_set = impls.len() == 1;
+                let build: syn::ImplItem = if is_set {
                     syn::parse_quote! {
-                        #vis fn #build_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
+                        #vis fn #set_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
                             let ptrs = self.ptrs();
                             let #field_ident = unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)};
                             unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
@@ -182,7 +298,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 };
                 impls.last_mut().unwrap().items.push(build);
-                if !borrow {
+                if !is_set {
                     let trybuild = syn::parse_quote! {
                         #vis fn #try_build_ident<F, E>(mut self, initf: F) -> Result<#substruct_ident<'a>, E>
                             where F: FnOnce(#field_refs) -> Result<#ty_lt_b, E>
@@ -232,7 +348,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 store_refs.push(syn::parse_quote!(
                         unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&*(ptrs.#field_ident as *const _))}));
                 field_getters.push(syn::parse_quote! {
-                    #vis fn #field_ident(&'a self) -> &#ty_lt_a {
+                    #vis fn #ref_ident(&'a self) -> &#ty_lt_a {
                         unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&*(self.ptrs.#field_ident as *const _))}
                     }
                 });

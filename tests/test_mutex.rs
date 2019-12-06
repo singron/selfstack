@@ -18,12 +18,12 @@ mod store {
 #[test]
 fn test() {
     let mut s = store::Store::new();
-    let sub = s.build_data(vec![0]);
+    let sub = s.set_data(vec![0]);
     let sub = sub.build_m(|data| M {
         r: &data,
         m: Mutex::new(&data[0]),
     });
-    assert_eq!(sub.m().r, &[0]);
-    assert_eq!(*sub.m().m.lock().unwrap(), &0);
+    assert_eq!(sub.ref_m().r, &[0]);
+    assert_eq!(*sub.ref_m().m.lock().unwrap(), &0);
     std::mem::drop(sub);
 }

@@ -60,7 +60,7 @@ fn test_drop_counts() {
     let mut c_drops = 0;
     let mut store: Store = Store::new();
     {
-        let a = store.build_a(A {
+        let a = store.set_a(A {
             drop_count: &mut a_drops,
         });
         let b = a.build_b(|a: &A| B {
@@ -71,11 +71,11 @@ fn test_drop_counts() {
             b: b,
             drop_count: &mut c_drops,
         });
-        assert_eq!(*c.a().drop_count, 0);
-        assert_eq!(*c.b().drop_count, 0);
-        assert_eq!(*c.c().drop_count, 0);
-        assert_eq!(*c.c().b.drop_count, 0);
-        assert_eq!(*c.c().b.a.drop_count, 0);
+        assert_eq!(*c.ref_a().drop_count, 0);
+        assert_eq!(*c.ref_b().drop_count, 0);
+        assert_eq!(*c.ref_c().drop_count, 0);
+        assert_eq!(*c.ref_c().b.drop_count, 0);
+        assert_eq!(*c.ref_c().b.a.drop_count, 0);
         std::mem::drop(c);
         assert_eq!(a_drops, 1);
         assert_eq!(b_drops, 1);
@@ -85,15 +85,15 @@ fn test_drop_counts() {
     b_drops = 0;
     c_drops = 0;
     {
-        let a = store.build_a(A {
+        let a = store.set_a(A {
             drop_count: &mut a_drops,
         });
         let b = a.build_b(|a: &A| B {
             a: a,
             drop_count: &mut b_drops,
         });
-        assert_eq!(*b.a().drop_count, 0);
-        assert_eq!(*b.b().drop_count, 0);
+        assert_eq!(*b.ref_a().drop_count, 0);
+        assert_eq!(*b.ref_b().drop_count, 0);
         std::mem::drop(b);
         assert_eq!(a_drops, 1);
         assert_eq!(b_drops, 1);
@@ -103,10 +103,10 @@ fn test_drop_counts() {
     b_drops = 0;
     c_drops = 0;
     {
-        let a = store.build_a(A {
+        let a = store.set_a(A {
             drop_count: &mut a_drops,
         });
-        assert_eq!(*a.a().drop_count, 0);
+        assert_eq!(*a.ref_a().drop_count, 0);
         std::mem::drop(a);
         assert_eq!(a_drops, 1);
         assert_eq!(b_drops, 0);
@@ -116,7 +116,7 @@ fn test_drop_counts() {
     b_drops = 0;
     c_drops = 0;
     {
-        let a = store.build_a(A {
+        let a = store.set_a(A {
             drop_count: &mut a_drops,
         });
         let b = a
@@ -127,8 +127,8 @@ fn test_drop_counts() {
                 })
             })
             .unwrap();
-        assert_eq!(*b.a().drop_count, 0);
-        assert_eq!(*b.b().drop_count, 0);
+        assert_eq!(*b.ref_a().drop_count, 0);
+        assert_eq!(*b.ref_b().drop_count, 0);
         std::mem::drop(b);
         assert_eq!(a_drops, 1);
         assert_eq!(b_drops, 1);
