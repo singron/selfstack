@@ -263,6 +263,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 let is_set = impls.len() == 1;
                 let build: syn::ImplItem = if is_set {
                     syn::parse_quote! {
+                        #[inline]
                         #vis fn #set_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
                             let ptrs = self.ptrs();
                             let #field_ident = unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)};
@@ -275,6 +276,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 } else {
                     syn::parse_quote! {
+                        #[inline]
                         #vis fn #build_ident<F>(mut self, initf: F) -> #substruct_ident<'a>
                             where F: FnOnce(#field_refs) -> #ty_lt_b
                         {
@@ -295,6 +297,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 impls.last_mut().unwrap().items.push(build);
                 if !is_set {
                     let trybuild = syn::parse_quote! {
+                        #[inline]
                         #vis fn #try_build_ident<F, E>(mut self, initf: F) -> Result<#substruct_ident<'a>, E>
                             where F: FnOnce(#field_refs) -> Result<#ty_lt_b, E>
                         {
@@ -343,6 +346,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 store_refs.push(syn::parse_quote!(
                         unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&*(ptrs.#field_ident as *const _))}));
                 field_getters.push(syn::parse_quote! {
+                    #[inline]
                     #vis fn #ref_ident(&'a self) -> &#ty_lt_a {
                         unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&*(self.ptrs.#field_ident as *const _))}
                     }
@@ -361,6 +365,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 // make the store struct compilable, and the field will be
                 // dropped after 'a.
                 let mut_getter = syn::parse_quote! {
+                    #[inline]
                     #vis fn #mut_ident(&'b mut self) -> &'b mut #ty_lt_a {
                         unsafe{::std::mem::transmute::<&'b mut #ty_lt_static, &'b mut #ty_lt_a>(
                                 &mut *self.ptrs.#field_ident)}
@@ -380,6 +385,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                 };
                 let view_getter = syn::parse_quote! {
+                    #[inline]
                     #vis fn view(&'b mut self) -> #viewstruct_ident<'a, 'b> {
                         return #view_struct_expr;
                     }
