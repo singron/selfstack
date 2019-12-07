@@ -38,7 +38,8 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
             }
         }
         ref x => {
-            let msg = format!("type not supported {:?}", &x);
+            // TODO: Handle more types.
+            let msg = format!("type not supported: {:?}", &x);
             return Err(syn::Error::new(ty.span(), msg));
         }
     };
@@ -47,7 +48,7 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 
 #[proc_macro_attribute]
 /// selfstack produces a stack-like self-referential data structure with a safe interface. This is
-/// safe because layers in the stack can only reference layers below them and lower layers outlive
+/// safe because layers in the stack can only reference layers below them, and lower layers outlive
 /// higher layers. This restriction prevents cycles, dangling references, and other unsoundness
 /// that would generally be possible with self-reference.
 ///
@@ -191,7 +192,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     mut_name,
                     ref_name,
                 ) = match &field.ident {
-                    None => panic!("only named fields"),
+                    None => unreachable!(), // We know the fields are named.
                     Some(ident) => {
                         fields.insert(ident.clone(), true);
                         (
@@ -218,16 +219,10 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     return e.to_compile_error().into();
                 }
                 let ty_lt_static = field.ty.clone();
-                match &mut field.ty {
-                    syn::Type::Path(ref mut p) => {
-                        *p = syn::parse_quote!(::std::mem::MaybeUninit<#p>);
-                    }
-                    syn::Type::Reference(ref r) => {
-                        let new_ty = syn::parse_quote!(::std::mem::MaybeUninit<#r>);
-                        field.ty = syn::Type::Path(new_ty);
-                    }
-                    _ => panic!(),
-                };
+                {
+                    let fty = &field.ty;
+                    field.ty = syn::parse_quote!(::std::mem::MaybeUninit<#fty>);
+                }
                 let mut ty_lt_a = orig_ty.clone();
                 if let Err(e) = replace_lifetimes(&mut ty_lt_a, syn::parse_quote!('a)) {
                     return e.to_compile_error().into();
@@ -411,7 +406,13 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     .push(const_view_field.fields.iter().next().unwrap().clone());
             }
         }
-        _ => panic!("only named fields supported"),
+        // We could possibly use numbered fields, but that currently seems too complicated for the
+        // benefit.
+        _ => {
+            return syn::Error::new(struct_def.span(), "struct must have named fields")
+                .to_compile_error()
+                .into();
+        }
     };
 
     impls.first_mut().unwrap().items.push(syn::parse_quote! {
