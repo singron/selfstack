@@ -15,6 +15,14 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
         syn::Type::Path(ref mut p) => {
             for seg in &mut p.path.segments {
                 match &mut seg.arguments {
+                    syn::PathArguments::Parenthesized(ref mut args) => {
+                        for mut input in &mut args.inputs {
+                            replace_lifetimes(&mut input, lt.clone())?;
+                        }
+                        if let syn::ReturnType::Type(_, ty) = &mut args.output {
+                            replace_lifetimes(ty, lt.clone())?;
+                        }
+                    }
                     syn::PathArguments::AngleBracketed(ref mut args) => {
                         for mut arg in &mut args.args {
                             match &mut arg {
@@ -28,13 +36,13 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
                             }
                         }
                     }
-                    _ => (),
+                    syn::PathArguments::None => (),
                 }
             }
         }
         syn::Type::Reference(ref mut r) => {
             if let Some(ref mut l) = &mut r.lifetime {
-                *l = lt.clone();
+                *l = lt;
             }
         }
         ref x => {
@@ -442,8 +450,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     structs.push(store_ptrs_struct);
 
-    let res = quote!(#struct_def);
-    let mut out = res.into();
+    let mut out = quote!(#struct_def);
     for s in structs {
         s.to_tokens(&mut out);
     }
