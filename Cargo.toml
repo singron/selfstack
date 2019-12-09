@@ -3,6 +3,7 @@ name = "selfstack"
 version = "0.2.0"
 authors = ["Eric Culp <eculperic@gmail.com>"]
 edition = "2018"
+license = "MIT OR Apache-2.0"
 
 [lib]
 proc-macro = true
