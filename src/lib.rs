@@ -160,6 +160,9 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
     struct_def.generics.params = new_params;
     let call_site = proc_macro2::Span::call_site();
+    // The _Ptrs struct will hold raw pointers to each field created up front. If we were to create
+    // references from the store directly as needed, that would invalidate existing references
+    // according to stacked borrows.
     let store_ptrs_ident = syn::Ident::new(&format!("{}_Ptrs", sname), call_site);
     let mut init_field_values =
         syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
@@ -219,6 +222,8 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         let orig_ty = field.ty.clone();
+        // We allow bogus lifetimes in order to express self-reference, so we have to erase the
+        // lifetimes in the struct definition by using 'static.
         if let Err(e) = replace_lifetimes(&mut field.ty, syn::parse_quote!('static)) {
             return e.to_compile_error().into();
         }
@@ -227,6 +232,8 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let fty = &field.ty;
             field.ty = syn::parse_quote!(::std::mem::MaybeUninit<#fty>);
         }
+        // Prepare some types with single lifetimes so that generated functions can just use 'a,
+        // 'b, and '_.
         let mut ty_lt_a = orig_ty.clone();
         if let Err(e) = replace_lifetimes(&mut ty_lt_a, syn::parse_quote!('a)) {
             return e.to_compile_error().into();
@@ -239,18 +246,6 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         if let Err(e) = replace_lifetimes(&mut ty_lt__, syn::parse_quote!('_)) {
             return e.to_compile_error().into();
         }
-        init_field_values.push(syn::parse_quote!(
-                #field_ident: ::std::mem::MaybeUninit::uninit()
-        ));
-        raw_ptr_field_values.push(syn::parse_quote!(
-                #field_ident: self.#field_ident.as_mut_ptr()
-        ));
-        let raw_ptr_field: syn::ItemStruct = syn::parse_quote!(struct dummy {
-                #field_ident: *mut #ty_lt_static,
-        });
-        raw_ptr_fields
-            .named
-            .push(raw_ptr_field.fields.iter().next().unwrap().clone());
         // The first layer has no previous layers to reference, so use set instead of
         // build.
         let is_set = impls.len() == 1;
@@ -384,30 +379,43 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         view_field_refs.pop();
         view_field_refs
             .push(syn::parse_quote!(#field_ident: unsafe{&*(self.ptrs.#field_ident as *const _)}));
-        let mut_view_field: syn::ItemStruct =
-            syn::parse_quote!(struct dummy {#vis #field_ident: &'b mut #ty_lt_a});
-        view_fields
-            .named
-            .push(mut_view_field.fields.iter().next().unwrap().clone());
+        // syn::parse_quote! doesn't handle struct field definitions. Instead, we use a dummy
+        // struct and extract the first field definition from the parsed value.
+        fn first_field(s: syn::ItemStruct) -> syn::Field {
+            s.fields.iter().next().unwrap().clone()
+        }
+        macro_rules! parse_field {
+            ($($t:tt)*) => {
+                first_field(syn::parse_quote!(struct dummy { $($t)* }))
+            };
+        };
+        let mut_view_field = parse_field!(#vis #field_ident: &'b mut #ty_lt_a);
+        view_fields.named.push(mut_view_field);
         structs.push(syn::parse_quote! {
             #vis struct #viewstruct_ident<'a: 'b, 'b>
                 #view_fields
         });
         view_fields.named.pop();
-        let const_view_field: syn::ItemStruct =
-            syn::parse_quote!(struct dummy {#vis #field_ident: &'b #ty_lt_a});
-        view_fields
-            .named
-            .push(const_view_field.fields.iter().next().unwrap().clone());
+        let const_view_field = parse_field!(#vis #field_ident: &'b #ty_lt_a);
+        view_fields.named.push(const_view_field);
+        init_field_values.push(syn::parse_quote!(
+                #field_ident: ::std::mem::MaybeUninit::uninit()
+        ));
+        raw_ptr_field_values.push(syn::parse_quote!(
+                #field_ident: self.#field_ident.as_mut_ptr()
+        ));
+        let raw_ptr_field = parse_field!(#field_ident: *mut #ty_lt_static);
+        raw_ptr_fields.named.push(raw_ptr_field);
     }
 
-    impls.first_mut().unwrap().items.push(syn::parse_quote! {
+    let store_impl = impls.first_mut().unwrap();
+    store_impl.items.push(syn::parse_quote! {
         #[inline]
         #vis fn new() -> Self {
              #sname { #init_field_values }
         }
     });
-    impls.first_mut().unwrap().items.push(syn::parse_quote! {
+    store_impl.items.push(syn::parse_quote! {
         #[inline]
         fn ptrs(&mut self) -> #store_ptrs_ident {
             #store_ptrs_ident {
