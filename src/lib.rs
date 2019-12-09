@@ -186,218 +186,8 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     impls.push(store_impl);
 
-    match &mut struct_def.fields {
-        syn::Fields::Named(ref mut fns) => {
-            for field in fns.named.iter_mut() {
-                let field_ident = field.ident.as_ref().unwrap();
-                let build_ident = syn::Ident::new(&format!("build_{}", field_ident), call_site);
-                let set_ident = syn::Ident::new(&format!("set_{}", field_ident), call_site);
-                let try_build_ident =
-                    syn::Ident::new(&format!("try_build_{}", field_ident), call_site);
-                let substruct_ident =
-                    syn::Ident::new(&format!("{}_{}", struct_def.ident, field_ident), call_site);
-                let viewstruct_ident = syn::Ident::new(
-                    &format!("{}_View_{}", struct_def.ident, field_ident),
-                    call_site,
-                );
-                let mut_ident = syn::Ident::new(&format!("mut_{}", field_ident), call_site);
-                let ref_ident = syn::Ident::new(&format!("ref_{}", field_ident), call_site);
-
-                match &field.vis {
-                    syn::Visibility::Inherited => (),
-                    x => {
-                        return syn::Error::new(x.span(), "fields of a selfstack must be private")
-                            .to_compile_error()
-                            .into();
-                    }
-                }
-                let orig_ty = field.ty.clone();
-                if let Err(e) = replace_lifetimes(&mut field.ty, syn::parse_quote!('static)) {
-                    return e.to_compile_error().into();
-                }
-                let ty_lt_static = field.ty.clone();
-                {
-                    let fty = &field.ty;
-                    field.ty = syn::parse_quote!(::std::mem::MaybeUninit<#fty>);
-                }
-                let mut ty_lt_a = orig_ty.clone();
-                if let Err(e) = replace_lifetimes(&mut ty_lt_a, syn::parse_quote!('a)) {
-                    return e.to_compile_error().into();
-                }
-                let mut ty_lt_b = orig_ty.clone();
-                if let Err(e) = replace_lifetimes(&mut ty_lt_b, syn::parse_quote!('b)) {
-                    return e.to_compile_error().into();
-                }
-                let mut ty_lt__ = orig_ty.clone();
-                if let Err(e) = replace_lifetimes(&mut ty_lt__, syn::parse_quote!('_)) {
-                    return e.to_compile_error().into();
-                }
-                init_field_values.push(syn::parse_quote!(
-                        #field_ident: ::std::mem::MaybeUninit::uninit()
-                ));
-                raw_ptr_field_values.push(syn::parse_quote!(
-                        #field_ident: self.#field_ident.as_mut_ptr()
-                ));
-                let raw_ptr_field: syn::ItemStruct = syn::parse_quote!(struct dummy {
-                        #field_ident: *mut #ty_lt_static,
-                });
-                raw_ptr_fields
-                    .named
-                    .push(raw_ptr_field.fields.iter().next().unwrap().clone());
-                // The first layer has no previous layers to reference, so use set instead of
-                // build.
-                let is_set = impls.len() == 1;
-                let build: syn::ImplItem = if is_set {
-                    syn::parse_quote! {
-                        #[inline]
-                        #vis fn #set_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
-                            let ptrs = self.ptrs();
-                            let #field_ident = unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)};
-                            unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
-                            #substruct_ident{
-                                _store: ::std::marker::PhantomData,
-                                ptrs,
-                            }
-                        }
-                    }
-                } else {
-                    syn::parse_quote! {
-                        #[inline]
-                        #vis fn #build_ident<F>(mut self, initf: F) -> #substruct_ident<'a>
-                            where F: FnOnce(#field_refs) -> #ty_lt_b
-                        {
-                            let ptrs = self.ptrs;
-                            ::std::mem::forget(self);
-                            let #field_ident = {
-                                let #field_ident = initf(#store_refs);
-                                unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
-                            };
-                            unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
-                            #substruct_ident{
-                                _store: ::std::marker::PhantomData,
-                                ptrs,
-                            }
-                        }
-                    }
-                };
-                impls.last_mut().unwrap().items.push(build);
-                if !is_set {
-                    let trybuild = syn::parse_quote! {
-                        #[inline]
-                        #vis fn #try_build_ident<F, E>(mut self, initf: F) -> Result<#substruct_ident<'a>, E>
-                            where F: FnOnce(#field_refs) -> Result<#ty_lt_b, E>
-                        {
-                            let ptrs = self.ptrs;
-                            ::std::mem::forget(self);
-                            let #field_ident = {
-                                let #field_ident = initf(#store_refs)?;
-                                unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
-                            };
-                            unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
-                            Ok(#substruct_ident{
-                                _store: ::std::marker::PhantomData,
-                                ptrs,
-                            })
-                        }
-                    };
-                    impls.last_mut().unwrap().items.push(trybuild);
-                }
-                let substruct_def = syn::parse_quote! {
-                    #vis struct #substruct_ident<'a> {
-                        _store: ::std::marker::PhantomData<&'a mut #sname>,
-                        ptrs: #store_ptrs_ident,
-                    }
-                };
-                structs.push(substruct_def);
-                drop_stmts.stmts.insert(
-                    0,
-                    syn::parse_quote! {
-                        unsafe{::std::ptr::drop_in_place(self.ptrs.#field_ident)};
-                    },
-                );
-                let dropimpl = syn::parse_quote! {
-                    impl<'a> Drop for #substruct_ident<'a> {
-                        fn drop(&mut self) {
-                            #drop_stmts
-                        }
-                    }
-                };
-                impls.push(dropimpl);
-                let subimpl = syn::parse_quote! {
-                    impl<'a: 'b, 'b> #substruct_ident<'a> {
-                    }
-                };
-                impls.push(subimpl);
-                field_refs.push(syn::parse_quote!(&'a #ty_lt_a));
-                store_refs.push(syn::parse_quote!(
-                        unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&*(ptrs.#field_ident as *const _))}));
-                field_getters.push(syn::parse_quote! {
-                    #[inline]
-                    #vis fn #ref_ident(&'a self) -> &#ty_lt_a {
-                        unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&*(self.ptrs.#field_ident as *const _))}
-                    }
-                });
-                for getter in &field_getters {
-                    impls.last_mut().unwrap().items.push(getter.clone());
-                }
-                // The mut getter is a little more complicated. Interior
-                // lifetimes in mut references aren't covariant, unlike const
-                // references. In this case, the interior 'static lifetime
-                // isn't automatically subtyped to 'a. The danger is that if T
-                // contains a mutable reference, we could set that reference
-                // to something that lives as long as 'a, but supertype thinks
-                // it needs to live as long as 'static. Normally that would be
-                // correct, but in this case, the 'static lifetime is a lie to
-                // make the store struct compilable, and the field will be
-                // dropped after 'a.
-                let mut_getter = syn::parse_quote! {
-                    #[inline]
-                    #vis fn #mut_ident(&'b mut self) -> &'b mut #ty_lt_a {
-                        unsafe{::std::mem::transmute::<&'b mut #ty_lt_static, &'b mut #ty_lt_a>(
-                                &mut *self.ptrs.#field_ident)}
-                    }
-                };
-                impls.last_mut().unwrap().items.push(mut_getter);
-                if !view_field_refs.empty_or_trailing() {
-                    view_field_refs.push_punct(syn::Token![,](call_site));
-                }
-                view_field_refs.push(syn::parse_quote!(
-                        #field_ident: unsafe{::std::mem::transmute::<
-                            &'b mut #ty_lt_static, &'b mut #ty_lt_a>(
-                                &mut *self.ptrs.#field_ident)}));
-                let view_struct_expr: syn::Expr = syn::parse_quote! {
-                        #viewstruct_ident{
-                            #view_field_refs
-                        }
-                };
-                let view_getter = syn::parse_quote! {
-                    #[inline]
-                    #vis fn view(&'b mut self) -> #viewstruct_ident<'a, 'b> {
-                        return #view_struct_expr;
-                    }
-                };
-                impls.last_mut().unwrap().items.push(view_getter);
-                view_field_refs.pop();
-                view_field_refs.push(
-                    syn::parse_quote!(#field_ident: unsafe{&*(self.ptrs.#field_ident as *const _)}),
-                );
-                let mut_view_field: syn::ItemStruct =
-                    syn::parse_quote!(struct dummy {#vis #field_ident: &'b mut #ty_lt_a});
-                view_fields
-                    .named
-                    .push(mut_view_field.fields.iter().next().unwrap().clone());
-                structs.push(syn::parse_quote! {
-                    #vis struct #viewstruct_ident<'a: 'b, 'b>
-                        #view_fields
-                });
-                view_fields.named.pop();
-                let const_view_field: syn::ItemStruct =
-                    syn::parse_quote!(struct dummy {#vis #field_ident: &'b #ty_lt_a});
-                view_fields
-                    .named
-                    .push(const_view_field.fields.iter().next().unwrap().clone());
-            }
-        }
+    let struct_fields = match &mut struct_def.fields {
+        syn::Fields::Named(ref mut fns) => fns,
         // We could possibly use numbered fields, but that currently seems too complicated for the
         // benefit.
         _ => {
@@ -406,6 +196,210 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 .into();
         }
     };
+    for field in struct_fields.named.iter_mut() {
+        let field_ident = field.ident.as_ref().unwrap();
+        let build_ident = syn::Ident::new(&format!("build_{}", field_ident), call_site);
+        let set_ident = syn::Ident::new(&format!("set_{}", field_ident), call_site);
+        let try_build_ident = syn::Ident::new(&format!("try_build_{}", field_ident), call_site);
+        let substruct_ident =
+            syn::Ident::new(&format!("{}_{}", struct_def.ident, field_ident), call_site);
+        let viewstruct_ident = syn::Ident::new(
+            &format!("{}_View_{}", struct_def.ident, field_ident),
+            call_site,
+        );
+        let mut_ident = syn::Ident::new(&format!("mut_{}", field_ident), call_site);
+        let ref_ident = syn::Ident::new(&format!("ref_{}", field_ident), call_site);
+
+        match &field.vis {
+            syn::Visibility::Inherited => (),
+            x => {
+                return syn::Error::new(x.span(), "fields of a selfstack must be private")
+                    .to_compile_error()
+                    .into();
+            }
+        }
+        let orig_ty = field.ty.clone();
+        if let Err(e) = replace_lifetimes(&mut field.ty, syn::parse_quote!('static)) {
+            return e.to_compile_error().into();
+        }
+        let ty_lt_static = field.ty.clone();
+        {
+            let fty = &field.ty;
+            field.ty = syn::parse_quote!(::std::mem::MaybeUninit<#fty>);
+        }
+        let mut ty_lt_a = orig_ty.clone();
+        if let Err(e) = replace_lifetimes(&mut ty_lt_a, syn::parse_quote!('a)) {
+            return e.to_compile_error().into();
+        }
+        let mut ty_lt_b = orig_ty.clone();
+        if let Err(e) = replace_lifetimes(&mut ty_lt_b, syn::parse_quote!('b)) {
+            return e.to_compile_error().into();
+        }
+        let mut ty_lt__ = orig_ty.clone();
+        if let Err(e) = replace_lifetimes(&mut ty_lt__, syn::parse_quote!('_)) {
+            return e.to_compile_error().into();
+        }
+        init_field_values.push(syn::parse_quote!(
+                #field_ident: ::std::mem::MaybeUninit::uninit()
+        ));
+        raw_ptr_field_values.push(syn::parse_quote!(
+                #field_ident: self.#field_ident.as_mut_ptr()
+        ));
+        let raw_ptr_field: syn::ItemStruct = syn::parse_quote!(struct dummy {
+                #field_ident: *mut #ty_lt_static,
+        });
+        raw_ptr_fields
+            .named
+            .push(raw_ptr_field.fields.iter().next().unwrap().clone());
+        // The first layer has no previous layers to reference, so use set instead of
+        // build.
+        let is_set = impls.len() == 1;
+        let build: syn::ImplItem = if is_set {
+            syn::parse_quote! {
+                #[inline]
+                #vis fn #set_ident(&'a mut self, #field_ident: #ty_lt_a) -> #substruct_ident<'a> {
+                    let ptrs = self.ptrs();
+                    let #field_ident = unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)};
+                    unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
+                    #substruct_ident{
+                        _store: ::std::marker::PhantomData,
+                        ptrs,
+                    }
+                }
+            }
+        } else {
+            syn::parse_quote! {
+                #[inline]
+                #vis fn #build_ident<F>(mut self, initf: F) -> #substruct_ident<'a>
+                    where F: FnOnce(#field_refs) -> #ty_lt_b
+                {
+                    let ptrs = self.ptrs;
+                    ::std::mem::forget(self);
+                    let #field_ident = {
+                        let #field_ident = initf(#store_refs);
+                        unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
+                    };
+                    unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
+                    #substruct_ident{
+                        _store: ::std::marker::PhantomData,
+                        ptrs,
+                    }
+                }
+            }
+        };
+        impls.last_mut().unwrap().items.push(build);
+        if !is_set {
+            let trybuild = syn::parse_quote! {
+                #[inline]
+                #vis fn #try_build_ident<F, E>(mut self, initf: F) -> Result<#substruct_ident<'a>, E>
+                    where F: FnOnce(#field_refs) -> Result<#ty_lt_b, E>
+                {
+                    let ptrs = self.ptrs;
+                    ::std::mem::forget(self);
+                    let #field_ident = {
+                        let #field_ident = initf(#store_refs)?;
+                        unsafe{::std::mem::transmute::<#ty_lt__, #ty_lt_static>(#field_ident)}
+                    };
+                    unsafe{::std::ptr::write(ptrs.#field_ident, #field_ident)};
+                    Ok(#substruct_ident{
+                        _store: ::std::marker::PhantomData,
+                        ptrs,
+                    })
+                }
+            };
+            impls.last_mut().unwrap().items.push(trybuild);
+        }
+        let substruct_def = syn::parse_quote! {
+            #vis struct #substruct_ident<'a> {
+                _store: ::std::marker::PhantomData<&'a mut #sname>,
+                ptrs: #store_ptrs_ident,
+            }
+        };
+        structs.push(substruct_def);
+        drop_stmts.stmts.insert(
+            0,
+            syn::parse_quote! {
+                unsafe{::std::ptr::drop_in_place(self.ptrs.#field_ident)};
+            },
+        );
+        let dropimpl = syn::parse_quote! {
+            impl<'a> Drop for #substruct_ident<'a> {
+                fn drop(&mut self) {
+                    #drop_stmts
+                }
+            }
+        };
+        impls.push(dropimpl);
+        let subimpl = syn::parse_quote! {
+            impl<'a: 'b, 'b> #substruct_ident<'a> {
+            }
+        };
+        impls.push(subimpl);
+        field_refs.push(syn::parse_quote!(&'a #ty_lt_a));
+        store_refs.push(syn::parse_quote!(
+                        unsafe{::std::mem::transmute::<&'_ #ty_lt_a, &'a #ty_lt_a>(&*(ptrs.#field_ident as *const _))}));
+        field_getters.push(syn::parse_quote! {
+                    #[inline]
+                    #vis fn #ref_ident(&'a self) -> &#ty_lt_a {
+                        unsafe{::std::mem::transmute::<&'_ #ty_lt_static, &'a #ty_lt_a>(&*(self.ptrs.#field_ident as *const _))}
+                    }
+                });
+        for getter in &field_getters {
+            impls.last_mut().unwrap().items.push(getter.clone());
+        }
+        // The mut getter is a little more complicated. Interior lifetimes in mut references aren't
+        // covariant, unlike const references. In this case, the interior 'static lifetime isn't
+        // automatically subtyped to 'a. The danger is that if T contains a mutable reference, we
+        // could set that reference to something that lives as long as 'a, but supertype thinks it
+        // needs to live as long as 'static. Normally that would be correct, but in this case, the
+        // 'static lifetime is a lie to make the store struct compilable, and the field will be
+        // dropped after 'a.
+        let mut_getter = syn::parse_quote! {
+            #[inline]
+            #vis fn #mut_ident(&'b mut self) -> &'b mut #ty_lt_a {
+                unsafe{::std::mem::transmute::<&'b mut #ty_lt_static, &'b mut #ty_lt_a>(
+                        &mut *self.ptrs.#field_ident)}
+            }
+        };
+        impls.last_mut().unwrap().items.push(mut_getter);
+        if !view_field_refs.empty_or_trailing() {
+            view_field_refs.push_punct(syn::Token![,](call_site));
+        }
+        view_field_refs.push(syn::parse_quote!(
+                        #field_ident: unsafe{::std::mem::transmute::<
+                            &'b mut #ty_lt_static, &'b mut #ty_lt_a>(
+                                &mut *self.ptrs.#field_ident)}));
+        let view_struct_expr: syn::Expr = syn::parse_quote! {
+                #viewstruct_ident{
+                    #view_field_refs
+                }
+        };
+        let view_getter = syn::parse_quote! {
+            #[inline]
+            #vis fn view(&'b mut self) -> #viewstruct_ident<'a, 'b> {
+                return #view_struct_expr;
+            }
+        };
+        impls.last_mut().unwrap().items.push(view_getter);
+        view_field_refs.pop();
+        view_field_refs
+            .push(syn::parse_quote!(#field_ident: unsafe{&*(self.ptrs.#field_ident as *const _)}));
+        let mut_view_field: syn::ItemStruct =
+            syn::parse_quote!(struct dummy {#vis #field_ident: &'b mut #ty_lt_a});
+        view_fields
+            .named
+            .push(mut_view_field.fields.iter().next().unwrap().clone());
+        structs.push(syn::parse_quote! {
+            #vis struct #viewstruct_ident<'a: 'b, 'b>
+                #view_fields
+        });
+        view_fields.named.pop();
+        let const_view_field: syn::ItemStruct =
+            syn::parse_quote!(struct dummy {#vis #field_ident: &'b #ty_lt_a});
+        view_fields
+            .named
+            .push(const_view_field.fields.iter().next().unwrap().clone());
+    }
 
     impls.first_mut().unwrap().items.push(syn::parse_quote! {
         #[inline]
