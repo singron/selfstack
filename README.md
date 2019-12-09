@@ -24,5 +24,5 @@ but it has a few differences.
   safely used at any level of initialization. You can emulate this feature in
   rental by boxing a rental and making it the first field of another rental.
 * Rental has more convenience features like `IntoSuffix`, which derefs the
-  rental into the last field and `into_head`, which drops all fields but the
+  rental as the last field and `into_head`, which drops all fields but the
   first and returns it.
