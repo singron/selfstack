@@ -6,7 +6,6 @@ extern crate quote;
 extern crate syn;
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
-use std::collections::HashMap;
 use syn::spanned::Spanned;
 
 /// Replace all lifetimes in ty with the lifetime lt.
@@ -150,7 +149,6 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 /// the individual fields of a struct however.
 pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut struct_def = syn::parse_macro_input!(item as syn::ItemStruct);
-    let mut fields: HashMap<syn::Ident, bool> = HashMap::new();
     let sname = &struct_def.ident;
     let mut new_params = syn::punctuated::Punctuated::new();
     let vis = &struct_def.vis;
@@ -161,8 +159,8 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     struct_def.generics.params = new_params;
-    let store_ptrs_ident =
-        syn::Ident::new(&format!("{}_Ptrs", sname), proc_macro2::Span::call_site());
+    let call_site = proc_macro2::Span::call_site();
+    let store_ptrs_ident = syn::Ident::new(&format!("{}_Ptrs", sname), call_site);
     let mut init_field_values =
         syn::punctuated::Punctuated::<syn::FieldValue, syn::Token![,]>::new();
     let mut raw_ptr_field_values =
@@ -191,29 +189,20 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     match &mut struct_def.fields {
         syn::Fields::Named(ref mut fns) => {
             for field in fns.named.iter_mut() {
-                let (
-                    build_name,
-                    set_name,
-                    try_build_name,
-                    substruct_name,
-                    viewstruct_name,
-                    mut_name,
-                    ref_name,
-                ) = match &field.ident {
-                    None => unreachable!(), // We know the fields are named.
-                    Some(ident) => {
-                        fields.insert(ident.clone(), true);
-                        (
-                            format!("build_{}", ident),
-                            format!("set_{}", ident),
-                            format!("try_build_{}", ident),
-                            format!("{}_{}", struct_def.ident, ident),
-                            format!("{}_View_{}", struct_def.ident, ident),
-                            format!("mut_{}", ident),
-                            format!("ref_{}", ident),
-                        )
-                    }
-                };
+                let field_ident = field.ident.as_ref().unwrap();
+                let build_ident = syn::Ident::new(&format!("build_{}", field_ident), call_site);
+                let set_ident = syn::Ident::new(&format!("set_{}", field_ident), call_site);
+                let try_build_ident =
+                    syn::Ident::new(&format!("try_build_{}", field_ident), call_site);
+                let substruct_ident =
+                    syn::Ident::new(&format!("{}_{}", struct_def.ident, field_ident), call_site);
+                let viewstruct_ident = syn::Ident::new(
+                    &format!("{}_View_{}", struct_def.ident, field_ident),
+                    call_site,
+                );
+                let mut_ident = syn::Ident::new(&format!("mut_{}", field_ident), call_site);
+                let ref_ident = syn::Ident::new(&format!("ref_{}", field_ident), call_site);
+
                 match &field.vis {
                     syn::Visibility::Inherited => (),
                     x => {
@@ -243,17 +232,6 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 if let Err(e) = replace_lifetimes(&mut ty_lt__, syn::parse_quote!('_)) {
                     return e.to_compile_error().into();
                 }
-                let field_ident = &field.ident;
-                let mut_ident = syn::Ident::new(&mut_name, proc_macro2::Span::call_site());
-                let ref_ident = syn::Ident::new(&ref_name, proc_macro2::Span::call_site());
-                let build_ident = syn::Ident::new(&build_name, proc_macro2::Span::call_site());
-                let set_ident = syn::Ident::new(&set_name, proc_macro2::Span::call_site());
-                let try_build_ident =
-                    syn::Ident::new(&try_build_name, proc_macro2::Span::call_site());
-                let substruct_ident =
-                    syn::Ident::new(&substruct_name, proc_macro2::Span::call_site());
-                let viewstruct_ident =
-                    syn::Ident::new(&viewstruct_name, proc_macro2::Span::call_site());
                 init_field_values.push(syn::parse_quote!(
                         #field_ident: ::std::mem::MaybeUninit::uninit()
                 ));
@@ -381,7 +359,7 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
                 impls.last_mut().unwrap().items.push(mut_getter);
                 if !view_field_refs.empty_or_trailing() {
-                    view_field_refs.push_punct(syn::Token![,](proc_macro2::Span::call_site()));
+                    view_field_refs.push_punct(syn::Token![,](call_site));
                 }
                 view_field_refs.push(syn::parse_quote!(
                         #field_ident: unsafe{::std::mem::transmute::<
