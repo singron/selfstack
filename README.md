@@ -26,6 +26,9 @@ but it has a few differences.
 * Rental has more convenience features like `IntoSuffix`, which derefs the
   rental as the last field and `into_head`, which drops all fields but the
   first and returns it.
+* Rental has more configuration options (e.g. mutability, subrentals,
+  covariance, deref). selfstack always works the same way and does not special
+  require configuration.
 
 ## License
 

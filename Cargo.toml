@@ -1,9 +1,13 @@
 [package]
 name = "selfstack"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Eric Culp <eculperic@gmail.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
+description = "A macro to generate self-referential structs"
+repository = "https://github.com/singron/selfstack"
+readme = "README.md"
+keywords = ["self", "reference"]
 
 [lib]
 proc-macro = true
