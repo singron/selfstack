@@ -5,7 +5,10 @@ extern crate proc_macro2;
 extern crate quote;
 extern crate syn;
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
+// quote is used by syn::parse_quote
+#[allow(unused_imports)]
+use quote::quote;
+use quote::ToTokens;
 use syn::spanned::Spanned;
 
 /// Replace all lifetimes in ty with the lifetime lt.
