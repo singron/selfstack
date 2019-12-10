@@ -5,13 +5,14 @@ pub struct M<'a> {
     m: Mutex<&'a u8>,
 }
 
-mod store {
-    use super::M;
+selfstack::selfstack! {
+    mod store {
+        use super::M;
 
-    #[selfstack::selfstack]
-    pub struct Store {
-        data: Vec<u8>,
-        m: M<'data>,
+        pub struct Store {
+            data: Vec<u8>,
+            m: M<'data>,
+        }
     }
 }
 

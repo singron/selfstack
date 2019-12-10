@@ -53,24 +53,31 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
     Ok(())
 }
 
-#[proc_macro_attribute]
+// proc_macros cannot be statements, but rustc thinks item proc_macros are statements in doctests.
+// If we use main(), then it forces it to be an item.
+#[allow(clippy::needless_doctest_main)]
+#[proc_macro]
 /// selfstack produces a stack-like self-referential data structure with a safe interface. This is
 /// safe because layers in the stack can only reference layers below them, and lower layers outlive
 /// higher layers. This restriction prevents cycles, dangling references, and other unsoundness
 /// that would generally be possible with self-reference.
 ///
-/// The struct with the selfstack attribute defines the layers of this stack with its fields. This
-/// struct is the Store. It provides storage for all fields ahead of time, but at first is
-/// uninitialized. Lifetime names are ignored, but you may use them to document references.
+/// You must declare a mod in this macro. This is so the macro can make unsafe operations private.
+///
+/// Any struct inside that mod defines the layers of a stack with its fields. This struct is the
+/// Store. It provides storage for all fields ahead of time, but at first is uninitialized.
+/// Lifetime names are ignored, but you may use them to document references.
 ///
 /// ```
-/// mod mystack {
-///     #[selfstack::selfstack]
-///     pub struct MyStore {
-///         layer1: u32,
-///         layer2: &'layer1 u32,
+/// selfstack::selfstack! {
+///     mod mystack {
+///         pub struct MyStore {
+///             layer1: u32,
+///             layer2: &'layer1 u32,
+///         }
 ///     }
 /// }
+/// # fn main() {}
 /// ```
 ///
 /// To initialize the first layer, call `set_$field(T)` on the Store with the value of the first
@@ -78,16 +85,19 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 /// initialized layers.
 ///
 /// ```
-/// # mod mystack {
-/// #     #[selfstack::selfstack]
-/// #     pub struct MyStore {
-/// #         layer1: u32,
-/// #         layer2: &'layer1 u32,
+/// # selfstack::selfstack! {
+/// #     mod mystack {
+/// #         pub struct MyStore {
+/// #             layer1: u32,
+/// #             layer2: &'layer1 u32,
+/// #         }
 /// #     }
 /// # }
 /// #
+/// # fn main() {
 /// let mut store = mystack::MyStore::new();
 /// let sub_struct = store.set_layer1(42);
+/// # }
 /// ```
 ///
 ///
@@ -98,19 +108,22 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 /// `Result`.
 ///
 /// ```
-/// # mod mystack {
-/// #     #[selfstack::selfstack]
-/// #     pub struct MyStore {
-/// #         layer1: u32,
-/// #         layer2: &'layer1 u32,
+/// # selfstack::selfstack! {
+/// #     mod mystack {
+/// #         pub struct MyStore {
+/// #             layer1: u32,
+/// #             layer2: &'layer1 u32,
+/// #         }
 /// #     }
 /// # }
 /// #
+/// # fn main() {
 /// # let mut store = mystack::MyStore::new();
 /// # let sub_struct = store.set_layer1(42);
 /// let sub_struct = sub_struct.build_layer2(|layer1: &u32|->&u32 {
-///     &layer1
+///     layer1
 /// });
+/// # }
 /// ```
 ///
 /// You can get a const reference to any layer or a mutable reference to the top-most layer using
@@ -119,14 +132,16 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 /// contains public fields referencing each layer [^0].
 ///
 /// ```
-/// # mod mystack {
-/// #     #[selfstack::selfstack]
-/// #     pub struct MyStore {
-/// #         layer1: u32,
-/// #         layer2: &'layer1 u32,
+/// # selfstack::selfstack! {
+/// #     mod mystack {
+/// #         pub struct MyStore {
+/// #             layer1: u32,
+/// #             layer2: &'layer1 u32,
+/// #         }
 /// #     }
 /// # }
 /// #
+/// # fn main() {
 /// # let mut store = mystack::MyStore::new();
 /// # let sub_struct = store.set_layer1(42);
 /// # let mut sub_struct = sub_struct.build_layer2(|layer1: &u32|->&u32 {
@@ -138,6 +153,7 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 /// assert_eq!(*view.layer2, view.layer1);
 /// *view.layer2 = &0; // Top layer is mutable.
 /// assert_eq!(**view.layer2, 0);
+/// # }
 /// ```
 ///
 /// When the SubStruct is dropped, the initialized fields will be dropped in reverse order and the
@@ -147,8 +163,40 @@ fn replace_lifetimes(ty: &mut syn::Type, lt: syn::Lifetime) -> Result<(), syn::E
 /// SubStruct borrows the entire SubStruct, and the borrow checker won't allow multiple borrows
 /// simultaneously if any are mutable. The borrow checker is able to allow simultaneous borrows to
 /// the individual fields of a struct however.
-pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    let mut struct_def = syn::parse_macro_input!(item as syn::ItemStruct);
+pub fn selfstack(item: TokenStream) -> TokenStream {
+    let mut mod_def = syn::parse_macro_input!(item as syn::ItemMod);
+    if let Some((_, content)) = &mut mod_def.content {
+        let input_content = std::mem::replace(content, Vec::new());
+        for item in input_content {
+            match item {
+                syn::Item::Struct(s) => {
+                    if let Err(e) = selfstack_struct(s, content) {
+                        return e.to_compile_error().into();
+                    }
+                }
+                syn::Item::Use(u) => {
+                    content.push(syn::Item::Use(u));
+                }
+                _ => {
+                    // Allowing other items inside the mod (like fn and impl) could circumvent the
+                    // safe interface.
+                    return syn::Error::new_spanned(item, "item not supported in a selfstack mod")
+                        .to_compile_error()
+                        .into();
+                }
+            }
+        }
+    }
+    let mut out = proc_macro2::TokenStream::new();
+    mod_def.to_tokens(&mut out);
+    out.into()
+}
+
+/// This is invoked for each input struct and should push all output Items to out.
+fn selfstack_struct(
+    mut struct_def: syn::ItemStruct,
+    out: &mut Vec<syn::Item>,
+) -> Result<(), syn::Error> {
     let sname = &struct_def.ident;
     let mut new_params = syn::punctuated::Punctuated::new();
     let vis = &struct_def.vis;
@@ -194,9 +242,10 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         // We could possibly use numbered fields, but that currently seems too complicated for the
         // benefit.
         _ => {
-            return syn::Error::new(struct_def.span(), "struct must have named fields")
-                .to_compile_error()
-                .into();
+            return Err(syn::Error::new(
+                struct_def.span(),
+                "struct must have named fields",
+            ));
         }
     };
     for field in struct_fields.named.iter_mut() {
@@ -216,17 +265,16 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         match &field.vis {
             syn::Visibility::Inherited => (),
             x => {
-                return syn::Error::new(x.span(), "fields of a selfstack must be private")
-                    .to_compile_error()
-                    .into();
+                return Err(syn::Error::new(
+                    x.span(),
+                    "fields of a selfstack must be private",
+                ))
             }
         }
         let orig_ty = field.ty.clone();
         // We allow bogus lifetimes in order to express self-reference, so we have to erase the
         // lifetimes in the struct definition by using 'static.
-        if let Err(e) = replace_lifetimes(&mut field.ty, syn::parse_quote!('static)) {
-            return e.to_compile_error().into();
-        }
+        replace_lifetimes(&mut field.ty, syn::parse_quote!('static))?;
         let ty_lt_static = field.ty.clone();
         {
             let fty = &field.ty;
@@ -235,17 +283,11 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
         // Prepare some types with single lifetimes so that generated functions can just use 'a,
         // 'b, and '_.
         let mut ty_lt_a = orig_ty.clone();
-        if let Err(e) = replace_lifetimes(&mut ty_lt_a, syn::parse_quote!('a)) {
-            return e.to_compile_error().into();
-        }
+        replace_lifetimes(&mut ty_lt_a, syn::parse_quote!('a))?;
         let mut ty_lt_b = orig_ty.clone();
-        if let Err(e) = replace_lifetimes(&mut ty_lt_b, syn::parse_quote!('b)) {
-            return e.to_compile_error().into();
-        }
+        replace_lifetimes(&mut ty_lt_b, syn::parse_quote!('b))?;
         let mut ty_lt__ = orig_ty.clone();
-        if let Err(e) = replace_lifetimes(&mut ty_lt__, syn::parse_quote!('_)) {
-            return e.to_compile_error().into();
-        }
+        replace_lifetimes(&mut ty_lt__, syn::parse_quote!('_))?;
         // The first layer has no previous layers to reference, so use set instead of
         // build.
         let is_set = impls.len() == 1;
@@ -430,12 +472,12 @@ pub fn selfstack(_attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     structs.push(store_ptrs_struct);
 
-    let mut out = quote!(#struct_def);
+    out.push(syn::Item::Struct(struct_def));
     for s in structs {
-        s.to_tokens(&mut out);
+        out.push(syn::Item::Struct(s));
     }
     for i in impls {
-        i.to_tokens(&mut out);
+        out.push(syn::Item::Impl(i));
     }
-    out.into()
+    Ok(())
 }

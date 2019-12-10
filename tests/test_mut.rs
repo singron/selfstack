@@ -2,11 +2,12 @@ struct A {
     x: u32,
 }
 
-mod store {
-    use super::*;
-    #[selfstack::selfstack]
-    pub(super) struct Store {
-        a: A,
+selfstack::selfstack! {
+    mod store {
+        use super::*;
+        pub(super) struct Store {
+            a: A,
+        }
     }
 }
 
