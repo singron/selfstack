@@ -1,5 +1,7 @@
 # selfstack
 
+[![docs.rs](https://docs.rs/selfstack/badge.svg)](https://docs.rs/selfstack)
+
 selfstack is a procedural macro that produces a stack-like self-referential
 data structure with a safe interface. This is safe because layers in the stack
 can only reference layers below them, and lower layers outlive higher layers.
@@ -27,8 +29,8 @@ but it has a few differences.
   rental as the last field and `into_head`, which drops all fields but the
   first and returns it.
 * Rental has more configuration options (e.g. mutability, subrentals,
-  covariance, deref). selfstack always works the same way and does not special
-  require configuration.
+  covariance, deref). selfstack always works the same way and does not require
+  special configuration.
 
 ## License
 
